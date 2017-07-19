@@ -1,0 +1,13 @@
+[package]
+name = "fmp3"
+version = "0.1.0"
+authors = ["Jacob Eldergill Beck <jacob@ebeck.io>"]
+
+[dependencies]
+clap = "^2.25.0"
+error-chain = "^0.10.0"
+id3 = "^0.1.0"
+metaflac = "^0.1.0"
+serde = "^1.0.0"
+serde_derive = "^1.0.0"
+toml = "^0.4.0"
