@@ -35,7 +35,6 @@ TODO
 
 - tests if I ever decide I care about that for this project
 - date -> year
-- threading
 - ???
 
 Usage

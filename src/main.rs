@@ -1,35 +1,46 @@
+
 #[macro_use]
 extern crate error_chain;
 #[macro_use]
 extern crate serde_derive;
+#[macro_use]
+extern crate clap;
+#[macro_use]
+extern crate log;
 
+
+extern crate duct;
+extern crate env_logger;
+extern crate num_cpus;
 extern crate metaflac;
 extern crate id3;
-extern crate clap;
 extern crate toml;
+extern crate scoped_pool;
 
-use clap::{App, Arg};
-use std::fs::{File, remove_file, read_dir};
+use std::fs::{File, remove_file};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::os::unix::io::{IntoRawFd, FromRawFd};
+use std::sync::mpsc::channel;
 
+use clap::Arg;
+use scoped_pool::Pool;
 
 mod error;
 pub use error::{Result, Error, ErrorKind};
 
+mod fs;
+
 mod tags;
 pub use tags::flac_to_mp3;
 
-fn make_command<'a>(cmdline: &Vec<String>, filepath: &'a Path) -> Command {
+fn make_command<'a>(cmdline: &Vec<String>, filepath: &'a Path) -> duct::Expression {
     if cmdline.len() == 0 {
         panic!("Invalid cmdline, no args!");
     }
-    // if we can't convert the filepath into a string I'm ok with panic'ing.
+    // if we can't convert the filepath into a strng I'm ok with panic'ing.
     let pathstr = filepath.to_str().unwrap();
-    let mut cmd = Command::new(&cmdline[0]);
-    cmd.args(cmdline.iter().skip(1).map(|c| {
+    let exe = &cmdline[0];
+    let args = cmdline.iter().skip(1).map(|c| {
         if c == "{{}}" {
             "{}"
         } else if c == "{}" {
@@ -37,14 +48,12 @@ fn make_command<'a>(cmdline: &Vec<String>, filepath: &'a Path) -> Command {
         } else {
             c
         }
-    }));
-    cmd
+    });
+    duct::cmd(exe, args)
 }
 
 
-
-// #[derive(Debug, Deserialize)]
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug, Clone)]
 struct Converter {
     flac_command: Vec<String>,
     mp3_command: Vec<String>,
@@ -52,11 +61,10 @@ struct Converter {
     remove_after: bool,
     #[serde(default)]
     overwrite: bool,
+    #[serde(default)]
+    workers: usize,
 }
 
-fn compute_mp3_path(flac_path: &Path) -> PathBuf {
-    flac_path.with_extension("mp3")
-}
 
 impl Converter {
     fn new_from_str(data: &str) -> Result<Self> {
@@ -79,57 +87,111 @@ impl Converter {
         Self::new_from_str(&data)
     }
 
-    fn convert_file_only(&self, flac_path: &Path) -> Result<()> {
-        let mp3_path = compute_mp3_path(flac_path);
+    fn convert_file_only(&self, flac_path: &Path, mp3_path: &Path) -> Result<()> {
+        debug!("Starting flac conversion for {:?}", flac_path);
         if mp3_path.exists() && !self.overwrite {
+            debug!("Skipping destination file {:?}, it exists", mp3_path);
             return Err(Error::from_kind(ErrorKind::PathExists(mp3_path.to_path_buf())));
         }
-        let flac_proc = make_command(&self.flac_command, flac_path).stdout(Stdio::piped()).spawn()?;
-        let flac_stdout = flac_proc.stdout.unwrap();
-        let mp3_stdin = unsafe { Stdio::from_raw_fd(flac_stdout.into_raw_fd()) };
-        make_command(&self.mp3_command, &mp3_path).stdin(mp3_stdin).status()?;
+        let flac_proc = make_command(&self.flac_command, flac_path);
+        let mp3_proc = make_command(&self.mp3_command, mp3_path);
+        debug!("Starting mp3 conversion for {:?}", mp3_path);
+        let result = flac_proc.pipe(mp3_proc).read()?;
+        debug!("Got mp3 status for {:?}: {:?}", mp3_path, result);
         Ok(())
     }
 
-    fn convert_tags(&self, flac_path: &Path) -> Result<()> {
-        let mp3_path = compute_mp3_path(flac_path);
-        flac_to_mp3(flac_path, &mp3_path)
+    fn convert_tags(&self, flac_path: &Path, mp3_path: &Path) -> Result<()> {
+        debug!("converting tags");
+        let ret = flac_to_mp3(flac_path, mp3_path);
+        debug!("converted tags");
+        ret
     }
-    fn convert_leave_both(&self, flac_path: &Path) -> Result<()> {
-        self.convert_file_only(flac_path)?;
-        self.convert_tags(flac_path)?;
+    fn convert_leave_both<P>(&self, flac_path: P) -> Result<()>
+        where P: AsRef<Path>
+    {
+        let flac_path = flac_path.as_ref();
+        let mp3_path = &flac_path.with_extension("mp3");
+        info!("converting file {:?} to {:?}", flac_path, mp3_path);
+        self.convert_file_only(flac_path, mp3_path)?;
+        self.convert_tags(flac_path, mp3_path)?;
         Ok(())
     }
-    fn convert(&self, flac_path: &Path) -> Result<()> {
+    fn convert<P>(&self, flac_path: P) -> Result<()>
+        where P: AsRef<Path>
+    {
+        let flac_path = flac_path.as_ref();
+        info!("Starting conversion process for {:?}", flac_path);
         self.convert_leave_both(flac_path)?;
         if self.remove_after {
             remove_file(flac_path)?;
         }
+        debug!("Finished conversion process for {:?}", flac_path);
         Ok(())
     }
-    fn convert_directory(&self, root: &Path) -> Result<()> {
-        for entry in read_dir(&Path::new(root))? {
-            let path = entry?.path();
-            if !path.is_file() {
-                continue;
-            }
-            if let Some(ext) = path.extension() {
-                if ext != "flac" {
-                    continue;
+
+    fn convert_directories_serial(&self, directories: Vec<PathBuf>) -> Vec<Error> {
+        let mut errors = Vec::new();
+        for flac in fs::MultiReadFlacDir::new(directories) {
+            match flac {
+                Ok(path) => {
+                    if let Err(e) = self.convert(&path) {
+                        errors.push(e);
+                    }
                 }
-            } else {
-                continue;
-            }
-            self.convert(&path)?;
+                Err(e) => errors.push(Error::from(e)),
+            };
         }
-        Ok(())
+        errors
+    }
+
+    fn convert_directories_parallel(&self, directories: Vec<PathBuf>) -> Vec<Error> {
+        let pool = Pool::new(self.workers);
+        let (sender, receiver) = channel();
+        pool.scoped(|scope| {
+            for flac in fs::MultiReadFlacDir::new(directories) {
+                match flac {
+                    // if these sends don't work, it's pretty reasonable to panic
+                    Ok(path) => {
+                        let sender = sender.clone();
+                        let path = path.clone();
+                        scope.execute(move|| {
+                            sender.send(match self.convert(&path) {
+                                Ok(_) => None,
+                                Err(e) => Some(Error::from(e)),
+                            }).unwrap();
+                        });
+                    },
+                    Err(e) => {
+                        trace!("Reading directory got error {:?}", e);
+                        sender.send(Some(Error::from(e))).unwrap();
+                    }
+                }
+            }
+            drop(sender);
+        });
+        trace!("Completed loop");
+        let r = receiver.iter().filter_map(|x| x).collect();
+        trace!("Finished waiting");
+        r
+    }
+
+    fn convert_directories(&self, directories: Vec<PathBuf>) -> Vec<Error> {
+        debug!("what?");
+        if self.workers == 0 {
+            return vec![Error::from_kind(ErrorKind::BadWorkers)];
+        } else if self.workers == 1 {
+            self.convert_directories_serial(directories)
+        } else {
+            self.convert_directories_parallel(directories)
+        }
     }
 }
 
 
+
 fn parse_args() -> Result<(Converter, Vec<PathBuf>)> {
-    let app = App::new("flac-to-mp3")
-        .author("Jacob Eldergill Beck <jacob@ebeck.io>")
+    let app = app_from_crate!()
         .about("Converts FLAC files to mp3s (using available command line tools) and then \
                 rewrites their tags")
         .arg(Arg::with_name("remove")
@@ -146,6 +208,11 @@ fn parse_args() -> Result<(Converter, Vec<PathBuf>)> {
             .help("If set, negates an overwrite setting in the config file")
             .long("no-overwrite")
             .conflicts_with("overwrite"))
+        .arg(Arg::with_name("workers")
+            .help("The number of workers to use, i.e. 6. Defaults to 1. Set 0 for the number of CPUs.")
+            .long("num-workers")
+            .short("j")
+            .takes_value(true))
         .arg(Arg::with_name("config")
             .help("The config file to get commands from, if provided")
             .long("config")
@@ -172,6 +239,12 @@ fn parse_args() -> Result<(Converter, Vec<PathBuf>)> {
     } else if app.is_present("no overwrite") {
         converter.remove_after = false;
     }
+    match value_t!(app, "workers", usize) {
+        Ok(0) => converter.workers = num_cpus::get(),
+        Ok(w) => converter.workers = w,
+        Err(ref e) if e.kind == clap::ErrorKind::ArgumentNotFound => converter.workers = 1,
+        Err(e) => return Err(Error::from(e)),
+    };
     // This is stupid, if I want the list of paths I have to do it this way...
     let paths: Vec<PathBuf> = match app.values_of("DIRECTORIES") {
         Some(v) => v.map(|s| Path::new(s).to_path_buf()).collect(),
@@ -180,11 +253,14 @@ fn parse_args() -> Result<(Converter, Vec<PathBuf>)> {
     Ok((converter, paths))
 }
 
+
 fn main() {
-    let (converter, paths) = parse_args().unwrap();
-    for arg in paths {
-        if arg.is_dir() {
-            converter.convert_directory(&arg).unwrap();
+    env_logger::init().unwrap();
+    let (converter, paths) = parse_args().expect("Parsing argument failed");
+    let errors = converter.convert_directories(paths);
+    if errors.len() > 0 {
+        for e in errors {
+            error!("{:?}", e);
         }
     }
 }
