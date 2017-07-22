@@ -30,10 +30,14 @@ fn make_command<'a>(cmdline: &Vec<String>, filepath: &'a Path) -> Command {
     let pathstr = filepath.to_str().unwrap();
     let mut cmd = Command::new(&cmdline[0]);
     cmd.args(cmdline.iter().skip(1).map(|c| {
-            if c == "{{}}" {"{}"}
-            else if c == "{}" {pathstr}
-            else {c}
-        }));
+        if c == "{{}}" {
+            "{}"
+        } else if c == "{}" {
+            pathstr
+        } else {
+            c
+        }
+    }));
     cmd
 }
 
@@ -82,7 +86,7 @@ impl Converter {
         }
         let flac_proc = make_command(&self.flac_command, flac_path).stdout(Stdio::piped()).spawn()?;
         let flac_stdout = flac_proc.stdout.unwrap();
-        let mp3_stdin = unsafe { Stdio::from_raw_fd(flac_stdout.into_raw_fd())};
+        let mp3_stdin = unsafe { Stdio::from_raw_fd(flac_stdout.into_raw_fd()) };
         make_command(&self.mp3_command, &mp3_path).stdin(mp3_stdin).status()?;
         Ok(())
     }
@@ -111,10 +115,10 @@ impl Converter {
             }
             if let Some(ext) = path.extension() {
                 if ext != "flac" {
-                    continue
+                    continue;
                 }
             } else {
-                continue
+                continue;
             }
             self.convert(&path)?;
         }
@@ -123,40 +127,35 @@ impl Converter {
 }
 
 
-fn parse_args() -> Result<(Converter, Vec<PathBuf>)>{
+fn parse_args() -> Result<(Converter, Vec<PathBuf>)> {
     let app = App::new("flac-to-mp3")
         .author("Jacob Eldergill Beck <jacob@ebeck.io>")
-        .about("Converts FLAC files to mp3s (using available command line tools) and then rewrites their tags")
+        .about("Converts FLAC files to mp3s (using available command line tools) and then \
+                rewrites their tags")
         .arg(Arg::with_name("remove")
             .help("If set, remove flac files after conversion (dangerous!)")
-            .long("remove")
-        )
+            .long("remove"))
         .arg(Arg::with_name("no remove")
             .help("If set, negates a remove setting in the config file")
             .long("no-remove")
-            .conflicts_with("remove")
-        )
+            .conflicts_with("remove"))
         .arg(Arg::with_name("overwrite")
             .help("If set, overwrites existing mp3 files (obviously dangerous!)")
-            .long("overwrite")
-        )
+            .long("overwrite"))
         .arg(Arg::with_name("no overwrite")
             .help("If set, negates an overwrite setting in the config file")
             .long("no-overwrite")
-            .conflicts_with("overwrite")
-        )
+            .conflicts_with("overwrite"))
         .arg(Arg::with_name("config")
             .help("The config file to get commands from, if provided")
             .long("config")
             .short("c")
-            .takes_value(true)
-        )
+            .takes_value(true))
         .arg(Arg::with_name("DIRECTORIES")
             .help("Specifies the directories to search")
             .required(true)
             .multiple(true)
-            .index(1)
-        )
+            .index(1))
         .get_matches();
     let mut converter = match app.value_of("config") {
         Some(c) => Converter::new_from_file(Path::new(c)),

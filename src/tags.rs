@@ -73,12 +73,14 @@ impl TagGettersSetters for metaflac::Tag {
         firstref!(self.get_vorbis("albumartist"))
     }
     fn get_number(&self) -> Option<u32> {
-        self.get_vorbis("tracknumber").and_then(|v| v.get(0).and_then(|t| {
-            match t.parse::<u32>() {
-                Ok(n) => Some(n),
-                Err(_) => None
-            }
-        }))
+        self.get_vorbis("tracknumber").and_then(|v| {
+            v.get(0).and_then(|t| {
+                match t.parse::<u32>() {
+                    Ok(n) => Some(n),
+                    Err(_) => None,
+                }
+            })
+        })
     }
     fn get_genre(&self) -> Option<&str> {
         firstref!(self.get_vorbis("genre"))
