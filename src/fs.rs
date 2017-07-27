@@ -57,7 +57,7 @@ impl MultiReadFlacDir {
                 None => {
                     debug!("iterator complete on multireader");
                     return None;
-                },
+                }
             };
             // no need to emit an error
             if !candidate.is_dir() {

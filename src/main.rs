@@ -155,13 +155,14 @@ impl Converter {
                     Ok(path) => {
                         let sender = sender.clone();
                         let path = path.clone();
-                        scope.execute(move|| {
+                        scope.execute(move || {
                             sender.send(match self.convert(&path) {
-                                Ok(_) => None,
-                                Err(e) => Some(Error::from(e)),
-                            }).unwrap();
+                                    Ok(_) => None,
+                                    Err(e) => Some(Error::from(e)),
+                                })
+                                .unwrap();
                         });
-                    },
+                    }
                     Err(e) => {
                         trace!("Reading directory got error {:?}", e);
                         sender.send(Some(Error::from(e))).unwrap();
@@ -209,7 +210,8 @@ fn parse_args() -> Result<(Converter, Vec<PathBuf>)> {
             .long("no-overwrite")
             .conflicts_with("overwrite"))
         .arg(Arg::with_name("workers")
-            .help("The number of workers to use, i.e. 6. Defaults to 1. Set 0 for the number of CPUs.")
+            .help("The number of workers to use, i.e. 6. Defaults to 1. Set 0 for the number of \
+                   CPUs.")
             .long("num-workers")
             .short("j")
             .takes_value(true))
