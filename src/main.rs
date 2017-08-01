@@ -33,8 +33,8 @@ mod fs;
 mod tags;
 pub use tags::flac_to_mp3;
 
-fn make_command<'a>(cmdline: &Vec<String>, filepath: &'a Path) -> duct::Expression {
-    if cmdline.len() == 0 {
+fn make_command<'a>(cmdline: &[String], filepath: &'a Path) -> duct::Expression {
+    if cmdline.is_empty() {
         panic!("Invalid cmdline, no args!");
     }
     // if we can't convert the filepath into a strng I'm ok with panic'ing.
@@ -84,7 +84,7 @@ impl Converter {
         flac_command = ["flac", "-cd", "{}"]
         mp3_command = ["lame", "-V0", "-", "{}"]
         "#;
-        Self::new_from_str(&data)
+        Self::new_from_str(data)
     }
 
     fn convert_file_only(&self, flac_path: &Path, mp3_path: &Path) -> Result<()> {
@@ -260,7 +260,7 @@ fn main() {
     env_logger::init().unwrap();
     let (converter, paths) = parse_args().expect("Parsing argument failed");
     let errors = converter.convert_directories(paths);
-    if errors.len() > 0 {
+    if !errors.is_empty() {
         for e in errors {
             error!("{:?}", e);
         }
